@@ -1,0 +1,27 @@
+# VSCode workspace settings
+.vscode/
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Dependency directories & virtual envs
+node_modules/
+venv/
+.venv/
+
+# Environment / secrets
+.env
+*.local
+
+# Build, coverage and logs
+dist/
+build/
+coverage/
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Config file
+config.yaml
