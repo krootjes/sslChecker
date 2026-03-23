@@ -69,8 +69,10 @@ func main() {
 	}
 	app.data.SSL.DomainsMonitored = make(map[string]DomainStatus)
 
+	// Run initial check immediately
 	app.runChecks()
 
+	// Start periodic checks
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
@@ -101,6 +103,7 @@ func main() {
 func loadConfig(path string) (Config, error) {
 	var cfg Config
 
+	// Create default config if file does not exist
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		log.Printf("config not found, creating default config: %s", path)
 
@@ -119,6 +122,7 @@ func loadConfig(path string) (Config, error) {
 		return defaultCfg, nil
 	}
 
+	// Load existing config
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return cfg, err
@@ -188,6 +192,7 @@ func checkDomain(domain string) DomainStatus {
 		Timeout: 10 * time.Second,
 	}
 
+	// Attempt TCP connection to port 443
 	rawConn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(domain, "443"))
 	if err != nil {
 		status.Error = fmt.Sprintf("host unreachable: %v", err)
@@ -195,6 +200,7 @@ func checkDomain(domain string) DomainStatus {
 	}
 	defer rawConn.Close()
 
+	// Perform TLS handshake
 	tlsConn := tls.Client(rawConn, &tls.Config{
 		ServerName: domain,
 		MinVersion: tls.VersionTLS12,
@@ -217,10 +223,12 @@ func checkDomain(domain string) DomainStatus {
 	status.Issuer = cert.Issuer.String()
 	status.Subject = cert.Subject.String()
 
+	// Verify hostname
 	if err := cert.VerifyHostname(domain); err != nil {
 		return status
 	}
 
+	// Check certificate validity period
 	if now.Before(cert.NotBefore.UTC()) {
 		return status
 	}
@@ -228,6 +236,7 @@ func checkDomain(domain string) DomainStatus {
 		return status
 	}
 
+	// Validate certificate chain
 	roots, err := x509.SystemCertPool()
 	if err != nil {
 		return status
@@ -254,7 +263,7 @@ func checkDomain(domain string) DomainStatus {
 }
 
 func (app *App) handleAPI(w http.ResponseWriter, r *http.Request) {
-	// 🔥 NIEUW: logging van API access
+	// Log incoming API request
 	clientIP := getClientIP(r)
 	log.Printf("API request from %s %s %s", clientIP, r.Method, r.URL.Path)
 
@@ -283,13 +292,13 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func getClientIP(r *http.Request) string {
-	// check X-Forwarded-For (reverse proxy)
+	// Check X-Forwarded-For header (reverse proxy)
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		parts := strings.Split(xff, ",")
 		return strings.TrimSpace(parts[0])
 	}
 
-	// fallback naar RemoteAddr
+	// Fallback to RemoteAddr
 	ip, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
