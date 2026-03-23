@@ -1,4 +1,4 @@
-module ssl-monitor
+module sslChecker
 
 go 1.26.1
 
