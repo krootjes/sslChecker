@@ -10,12 +10,15 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"gopkg.in/yaml.v3"
 )
+
+const notAvailable = "not available"
 
 type Config struct {
 	Server struct {
@@ -30,19 +33,19 @@ type Config struct {
 }
 
 type DomainStatus struct {
-	Valid         bool   `json:"valid"`
-	ValidTill     string `json:"valid_till,omitempty"`
+	Valid         string `json:"valid"`
+	ValidTill     string `json:"valid_till"`
 	LastCheck     string `json:"last_check"`
-	DaysRemaining int    `json:"days_remaining,omitempty"`
-	Issuer        string `json:"issuer,omitempty"`
-	Subject       string `json:"subject,omitempty"`
-	Error         string `json:"error,omitempty"`
+	DaysRemaining string `json:"days_remaining"`
+	Issuer        string `json:"issuer"`
+	Subject       string `json:"subject"`
+	Error         string `json:"error"`
 }
 
 type APIResponse struct {
 	SSL struct {
 		DomainsMonitored map[string]DomainStatus `json:"domains_monitored"`
-	} `json:"ssl"`
+	} `json:"sslChecker"`
 }
 
 type App struct {
@@ -69,10 +72,10 @@ func main() {
 	}
 	app.data.SSL.DomainsMonitored = make(map[string]DomainStatus)
 
-	// Run initial check immediately
+	// Run initial check
 	app.runChecks()
 
-	// Start periodic checks
+	// Periodic checks
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
@@ -103,7 +106,7 @@ func main() {
 func loadConfig(path string) (Config, error) {
 	var cfg Config
 
-	// Create default config if file does not exist
+	// Create default config if not present
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		log.Printf("config not found, creating default config: %s", path)
 
@@ -122,7 +125,6 @@ func loadConfig(path string) (Config, error) {
 		return defaultCfg, nil
 	}
 
-	// Load existing config
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return cfg, err
@@ -177,13 +179,22 @@ func (app *App) runChecks() {
 	log.Println("SSL checks finished")
 }
 
+// Create default status with all fields populated
+func newDefaultStatus(now time.Time) DomainStatus {
+	return DomainStatus{
+		Valid:         "unknown",
+		ValidTill:     notAvailable,
+		LastCheck:     now.Format(time.RFC3339),
+		DaysRemaining: notAvailable,
+		Issuer:        notAvailable,
+		Subject:       notAvailable,
+		Error:         notAvailable,
+	}
+}
+
 func checkDomain(domain string) DomainStatus {
 	now := time.Now().UTC()
-
-	status := DomainStatus{
-		Valid:     false,
-		LastCheck: now.Format(time.RFC3339),
-	}
+	status := newDefaultStatus(now)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -192,53 +203,60 @@ func checkDomain(domain string) DomainStatus {
 		Timeout: 10 * time.Second,
 	}
 
-	// Attempt TCP connection to port 443
+	// TCP connectivity check
 	rawConn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(domain, "443"))
 	if err != nil {
+		status.Valid = "unknown"
 		status.Error = fmt.Sprintf("host unreachable: %v", err)
 		return status
 	}
 	defer rawConn.Close()
 
-	// Perform TLS handshake
+	// TLS handshake
 	tlsConn := tls.Client(rawConn, &tls.Config{
 		ServerName: domain,
 		MinVersion: tls.VersionTLS12,
 	})
 
 	if err := tlsConn.HandshakeContext(ctx); err != nil {
+		status.Valid = "invalid"
 		return status
 	}
 	defer tlsConn.Close()
 
 	cs := tlsConn.ConnectionState()
 	if len(cs.PeerCertificates) == 0 {
+		status.Valid = "invalid"
 		return status
 	}
 
 	cert := cs.PeerCertificates[0]
 
 	status.ValidTill = cert.NotAfter.UTC().Format(time.RFC3339)
-	status.DaysRemaining = int(time.Until(cert.NotAfter).Hours() / 24)
+	status.DaysRemaining = strconv.Itoa(int(time.Until(cert.NotAfter).Hours() / 24))
 	status.Issuer = cert.Issuer.String()
 	status.Subject = cert.Subject.String()
 
-	// Verify hostname
+	// Hostname validation
 	if err := cert.VerifyHostname(domain); err != nil {
+		status.Valid = "invalid"
 		return status
 	}
 
-	// Check certificate validity period
+	// Time validity
 	if now.Before(cert.NotBefore.UTC()) {
+		status.Valid = "invalid"
 		return status
 	}
 	if now.After(cert.NotAfter.UTC()) {
+		status.Valid = "invalid"
 		return status
 	}
 
-	// Validate certificate chain
+	// Chain validation
 	roots, err := x509.SystemCertPool()
 	if err != nil {
+		status.Valid = "invalid"
 		return status
 	}
 
@@ -255,15 +273,18 @@ func checkDomain(domain string) DomainStatus {
 	}
 
 	if _, err := cert.Verify(verifyOpts); err != nil {
+		status.Valid = "invalid"
 		return status
 	}
 
-	status.Valid = true
+	status.Valid = "valid"
+	status.Error = notAvailable
+
 	return status
 }
 
 func (app *App) handleAPI(w http.ResponseWriter, r *http.Request) {
-	// Log incoming API request
+	// Log API access
 	clientIP := getClientIP(r)
 	log.Printf("API request from %s %s %s", clientIP, r.Method, r.URL.Path)
 
@@ -286,19 +307,19 @@ func (app *App) handleAPI(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
-	json.NewEncoder(w).Encode(map[string]string{
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{
 		"status": "ok",
 	})
 }
 
 func getClientIP(r *http.Request) string {
-	// Check X-Forwarded-For header (reverse proxy)
+	// Check X-Forwarded-For header
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		parts := strings.Split(xff, ",")
 		return strings.TrimSpace(parts[0])
 	}
 
-	// Fallback to RemoteAddr
 	ip, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
